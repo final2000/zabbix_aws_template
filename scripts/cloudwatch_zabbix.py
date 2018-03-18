@@ -32,6 +32,7 @@ class AwsZabbix:
             'ec2':'InstanceId',
             'rds':'DBInstanceIdentifier',
             'elb':'LoadBalancerName',
+            'alb':'LoadBalancer',
             'ebs':'VolumeId',
             'billing': 'Currency'
         }
@@ -42,13 +43,44 @@ class AwsZabbix:
             aws_secret_access_key=secret
         )
         self.sum_stat_metrics = [
-            {'namespace': 'AWS/ELB', 'metricname': 'RequestCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'ActiveConnectionCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'ClientTLSNegotiationErrorCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'ConsumedLCUs'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HTTPCode_ELB_4XX_Count'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HTTPCode_ELB_5XX_Count'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HTTPCode_Target_2XX_Count'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HTTPCode_Target_3XX_Count'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HTTPCode_Target_4XX_Count'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HTTPCode_Target_5XX_Count'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'IPv6ProcessedBytes'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'IPv6RequestCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'NewConnectionCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'ProcessedBytes'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'RejectedConnectionCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'RequestCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'RequestCountPerTarget'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'RuleEvaluations'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'TargetConnectionErrorCount'},
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'TargetTLSNegotiationErrorCount'},
+            {'namespace': 'AWS/ELB', 'metricname': 'BackendConnectionErrors'},
             {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_Backend_2XX'},
             {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_Backend_3XX'},
             {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_Backend_4XX'},
             {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_Backend_5XX'},
             {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_ELB_4XX'},
-            {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_ELB_5XX'}
+            {'namespace': 'AWS/ELB', 'metricname': 'HTTPCode_ELB_5XX'},
+            {'namespace': 'AWS/ELB', 'metricname': 'RequestCount'},
+            {'namespace': 'AWS/ELB', 'metricname': 'SpilloverCount'}
+        ]
+        self.p95_stat_metrics = [
+        ]
+        self.min_stat_metrics = [
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'UnHealthyHostCount'},
+            {'namespace': 'AWS/ELB', 'metricname': 'UnHealthyHostCount'}
+        ]
+        self.max_stat_metrics = [
+            {'namespace': 'AWS/ApplicationELB', 'metricname': 'HealthyHostCount'},
+            {'namespace': 'AWS/ELB', 'metricname': 'HealthyHostCount'}
         ]
 
     def __get_metric_list(self):
@@ -63,10 +95,17 @@ class AwsZabbix:
         metric_list = []
         for data in resp["Metrics"]:
             metric = Metric(name=data["MetricName"], namespace=data["Namespace"], dimensions=data["Dimensions"])
-            if self.service == "elb":
+            if self.service == "elb" or self.service == "alb":
+                dims = {'AvailabilityZone': '', 'TargetGroup': ''}
                 for dimension in data["Dimensions"]:
-                    if dimension["Name"] == "AvailabilityZone":
-                       metric.name = data["MetricName"] + "." + dimension["Value"]
+                    dims[dimension['Name']] = dimension['Value']
+                if dims['AvailabilityZone']:
+                    if dims['TargetGroup']:
+                        metric.name = data["MetricName"] + "." + dims['AvailabilityZone'] + "." + dims['TargetGroup']
+                    else:
+                        metric.name = data["MetricName"] + "." + dims['AvailabilityZone']
+                elif dims['TargetGroup']:
+                    metric.name = data["MetricName"] + ".." + dims['TargetGroup']
             metric_list.append(metric)
         return metric_list
 
@@ -92,7 +131,7 @@ class AwsZabbix:
                     'Value': self.identity
                 }
             ]
-        if self.service == "elb":
+        if self.service == "elb" or self.service == "alb":
             split_metric_name = metric_name.split(".")
             if len(split_metric_name) == 2:
                 metric_name = split_metric_name[0]
@@ -102,6 +141,30 @@ class AwsZabbix:
                         'Value': split_metric_name[1]
                     }
                 )
+            elif len(split_metric_name) == 3 and split_metric_name[1]:
+                metric_name = split_metric_name[0]
+                dimensions.extend((
+                    {
+                        'Name': 'AvailabilityZone',
+                        'Value': split_metric_name[1]
+                    },
+                    {
+                        'Name': 'TargetGroup',
+                        'Value': split_metric_name[2]
+                    }
+                ))
+            elif len(split_metric_name) == 3 and not split_metric_name[1]:
+                metric_name = split_metric_name[0]
+                dimensions.append(
+                    {
+                        'Name': 'TargetGroup',
+                        'Value': split_metric_name[2]
+                    }
+                )
+        if stat_type.startswith('p'):
+            stats_var = {'ExtendedStatistics': [stat_type]}
+        else:
+            stats_var = {'Statistics': [stat_type]}
         stats = self.client.get_metric_statistics(
             Namespace=metric_namespace,
             MetricName=metric_name,
@@ -109,7 +172,7 @@ class AwsZabbix:
             StartTime=datetime.utcnow() - timedelta(minutes=timerange_min),
             EndTime=datetime.utcnow(),
             Period=period_sec,
-            Statistics=[stat_type],
+            **stats_var
         )
         return stats
 
@@ -159,6 +222,12 @@ class AwsZabbix:
             return str(datapoint["Average"])
         elif datapoint.has_key("Sum"):
             return str(datapoint["Sum"])
+        elif datapoint.has_key("Minimum"):
+            return str(datapoint["Minimum"])
+        elif datapoint.has_key("Maximum"):
+            return str(datapoint["Maximum"])
+        elif datapoint.has_key("ExtendedStatistics"):
+            return str(datapoint["ExtendedStatistics"].values()[0])
         else:
             return ""
 
@@ -208,6 +277,12 @@ class AwsZabbix:
                     target_metric_info['metricname'] = sum_stat_metric['metricname']
             if target_metric_info in self.sum_stat_metrics:
                 stats = self.__get_metric_stats(metric.name, metric.namespace, servicename, self.timerange_min, 'Sum')
+            elif target_metric_info in self.p95_stat_metrics:
+                stats = self.__get_metric_stats(metric.name, metric.namespace, servicename, self.timerange_min, 'p95')
+            elif target_metric_info in self.min_stat_metrics:
+                stats = self.__get_metric_stats(metric.name, metric.namespace, servicename, self.timerange_min, 'Minimum')
+            elif target_metric_info in self.max_stat_metrics:
+                stats = self.__get_metric_stats(metric.name, metric.namespace, servicename, self.timerange_min, 'Maximum')
             else:
                 stats = self.__get_metric_stats(metric.name, metric.namespace, servicename, self.timerange_min)
             send_data["data"].extend(self.__get_send_items(stats, metric))
